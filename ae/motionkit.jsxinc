@@ -1,0 +1,508 @@
+// ============================================================================
+// Apple-style Motion Kit — helper library (ExtendScript, ES3)
+// Every template is built from these helpers. Animation is expression-driven
+// and keyed to each layer's IN POINT, so retiming = sliding layer bars.
+// ============================================================================
+
+// SF Pro Display first; if it isn't installed (e.g. on Windows), fall back to
+// Google Sans, which ships in fonts/ (OFL). Google Sans has no Semibold, so
+// semi maps to Bold.
+var FONT = {
+    reg: "SFProDisplay-Regular",
+    med: "SFProDisplay-Medium",
+    semi: "SFProDisplay-Semibold",
+    bold: "SFProDisplay-Bold"
+};
+var FONT_FALLBACK = {
+    reg: "GoogleSans-Regular",
+    med: "GoogleSans-Medium",
+    semi: "GoogleSans-Bold",
+    bold: "GoogleSans-Bold"
+};
+function fontInstalled(ps) {
+    try { return app.fonts.getFontsByPostScriptName(ps).length > 0; } catch (e) { return true; } // older AE: no font API, assume present
+}
+var KAPPA = 0.5523;
+var LOGS = [];
+function LOG(s) { LOGS.push(s); }
+if ($.global.MK_FORCE_FALLBACK || !fontInstalled(FONT.reg)) { FONT = FONT_FALLBACK; LOG("SF Pro Display not found, using Google Sans"); }
+
+function hex(h) {
+    h = h.replace("#", "");
+    return [parseInt(h.substr(0, 2), 16) / 255, parseInt(h.substr(2, 2), 16) / 255, parseInt(h.substr(4, 2), 16) / 255];
+}
+
+var THEMES = {
+    light: { Background: "#F5F5F7", Card: "#FFFFFF", Text: "#1D1D1F", Secondary: "#86868B", Accent: "#0A84FF" },
+    white: { Background: "#FFFFFF", Card: "#F2F2F7", Text: "#1D1D1F", Secondary: "#86868B", Accent: "#0A84FF" },
+    dark:  { Background: "#1E1E1E", Card: "#2C2C2E", Text: "#F5F5F7", Secondary: "#98989D", Accent: "#0A84FF" }
+};
+
+var CTX = null;      // { comp, egp: [], colors: {} }
+var FOLD = {};       // project folders
+var SFX = {};        // name -> FootageItem
+var FX = "ADBE Effect Parade";
+var TR = "ADBE Transform Group";
+
+// ---------------------------------------------------------------- comp setup
+function begin(name, theme, dur, overrides) {
+    var comp = app.project.items.addComp(name, 1920, 1080, 1, dur, 30);
+    comp.parentFolder = FOLD.templates;
+    CTX = { comp: comp, egp: [], colors: {} };
+    var t = {};
+    for (var k in theme) t[k] = theme[k];
+    if (overrides) for (var k2 in overrides) t[k2] = overrides[k2];
+    comp.bgColor = hex(t.Background);
+
+    var bg = comp.layers.addSolid(hex(t.Background), "BG", 1920, 1080, 1, dur);
+    bg.label = 0;
+
+    var n = comp.layers.addNull(dur);
+    n.name = "CONTROLS";
+    n.label = 2;
+    n.property(TR).property("ADBE Anchor Point").setValue([0, 0]);
+    n.property(TR).property("ADBE Position").setValue([40, 40]);
+    n.comment = "All template settings live here. Also exposed in Essential Graphics.";
+
+    var order = ["Background", "Card", "Text", "Secondary", "Accent"];
+    for (var i = 0; i < order.length; i++) color(order[i], t[order[i]]);
+    for (var k3 in t) {
+        var seen = false;
+        for (var j = 0; j < order.length; j++) if (order[j] == k3) seen = true;
+        if (!seen) color(k3, t[k3]);
+    }
+    slider("Speed", 1, 3, "Animation Speed (1 = default)");
+    check("Animate Out", 1, 3);
+    check("Show Background", 1, 3);
+    slider("Blur Amount", 22, 3, "Reveal Blur");
+    slider("Type Speed", 30, 3, "Type Speed (chars/sec)");
+    slider("SFX Volume (dB)", 0, 4);
+    check("Mute SFX", 0, 4);
+
+    fillFx(bg, "Background");
+    bg.property(TR).property("ADBE Opacity").expression = 'thisComp.layer("CONTROLS").effect("Show Background")(1)*value;';
+    return comp;
+}
+
+function end() {
+    var comp = CTX.comp;
+    comp.layer("CONTROLS").moveToBeginning();
+    // flush Essential Graphics in group order: text, numbers, colors, settings, sound
+    for (var g = 0; g <= 4; g++) {
+        for (var i = 0; i < CTX.egp.length; i++) {
+            var e = CTX.egp[i];
+            if (e.g != g) continue;
+            try {
+                var ok = e.r().addToMotionGraphicsTemplateAs(comp, e.n);
+                if (!ok) LOG("EGP refused: " + comp.name + " / " + e.n);
+            } catch (err) { LOG("EGP fail: " + comp.name + " / " + e.n + " : " + err); }
+        }
+    }
+    try { comp.motionGraphicsTemplateName = comp.name; } catch (e2) {}
+    return comp;
+}
+
+function ctrl() { return CTX.comp.layer("CONTROLS"); }
+function addFx(layer, match, name) {
+    layer.property(FX).addProperty(match).name = name;
+    return layer.property(FX).property(name);
+}
+function q(group, label, resolver) { CTX.egp.push({ g: group, n: label, r: resolver }); }
+function qFx(fxName, label, group) {
+    q(group, label, function () { return ctrl().property(FX).property(fxName).property(1); });
+}
+function qText(layerName, label) {
+    q(0, label, function () { return CTX.comp.layer(layerName).property("ADBE Text Properties").property("ADBE Text Document"); });
+}
+
+function slider(name, v, group, label) {
+    var e = addFx(ctrl(), "ADBE Slider Control", name);
+    e.property(1).setValue(v);
+    if (group !== false && group !== undefined) qFx(name, label || name, group);
+    else if (group === undefined) qFx(name, label || name, 1);
+}
+function check(name, v, group) {
+    var e = addFx(ctrl(), "ADBE Checkbox Control", name);
+    e.property(1).setValue(v);
+    if (group !== false) qFx(name, name, group === undefined ? 3 : group);
+}
+function color(name, h) {
+    var e = addFx(ctrl(), "ADBE Color Control", name);
+    e.property(1).setValue(hex(h));
+    CTX.colors[name] = h;
+    qFx(name, name + " Color", 2);
+}
+function point(name, v) {
+    var e = addFx(ctrl(), "ADBE Point Control", name);
+    e.property(1).setValue(v);
+    qFx(name, name, 3);
+}
+function cref(name) { return 'thisComp.layer("CONTROLS").effect("' + name + '")(1)'; }
+
+// ---------------------------------------------------------------- transforms
+function tr(L, m) { return L.property(TR).property(m); }
+function pos(L, p) { tr(L, "ADBE Position").setValue(p); return L; }
+function at(L, t) { L.inPoint = t; return L; }
+// parent L to P (P anchored at 0,0 sitting at pPos) keeping compPos
+function kid(L, P, pPos, compPos) {
+    L.parent = P;
+    tr(L, "ADBE Scale").setValue([100, 100]);
+    tr(L, "ADBE Rotate Z").setValue(0);
+    pos(L, [compPos[0] - pPos[0], compPos[1] - pPos[1]]);
+    return L;
+}
+
+// ---------------------------------------------------------------- fills
+function fillFx(L, colName) {
+    var f = addFx(L, "ADBE Fill", "Color");
+    f.property("ADBE Fill-0002").setValue(hex(CTX.colors[colName] || "#FFFFFF"));
+    f.property("ADBE Fill-0002").expression = cref(colName) + ";";
+}
+function setCol(prop, c) {
+    if (c.charAt(0) == "#") { prop.setValue(hex(c)); return; }
+    prop.setValue(hex(CTX.colors[c] || "#FF00FF"));
+    prop.expression = cref(c) + ";";
+}
+
+// ---------------------------------------------------------------- text
+function T(name, str, o) {
+    var L = CTX.comp.layers.addText(str);
+    L.name = name;
+    var sp = L.property("ADBE Text Properties").property("ADBE Text Document");
+    var d = sp.value;
+    d.resetCharStyle();
+    d.resetParagraphStyle();
+    d.font = FONT[o.font || "reg"];
+    d.fontSize = o.size || 40;
+    d.applyFill = true;
+    d.applyStroke = false;
+    d.fillColor = hex(o.col && o.col.charAt(0) == "#" ? o.col : (CTX.colors[o.col || "Text"] || "#000000"));
+    d.tracking = o.track || 0;
+    if (o.leading) { d.autoLeading = false; d.leading = o.leading; }
+    d.justification = o.just == "C" ? ParagraphJustification.CENTER_JUSTIFY :
+        (o.just == "R" ? ParagraphJustification.RIGHT_JUSTIFY : ParagraphJustification.LEFT_JUSTIFY);
+    sp.setValue(d);
+    pos(L, [o.x || 0, o.y || 0]);
+    if (!o.col || o.col.charAt(0) != "#") fillFx(L, o.col || "Text");
+    if (o.egp) qText(name, o.egp);
+    return L;
+}
+// expression-safe access to another text layer's string
+function txtOf(layerName) {
+    return '(function(){var s=thisComp.layer("' + layerName + '").text.sourceText;return (s.value!==undefined?s.value:s)+"";})()';
+}
+
+// ---------------------------------------------------------------- shapes
+function shape(name, x, y) {
+    var L = CTX.comp.layers.addShape();
+    L.name = name;
+    pos(L, [x, y]);
+    return L;
+}
+function vg(L) { return L.property("ADBE Root Vectors Group"); }
+function group(L, g) { vg(L).addProperty("ADBE Vector Group").name = g; return g; }
+function G(L, g) { return vg(L).property(g); }
+function GC(L, g) { return G(L, g).property("ADBE Vectors Group"); }
+function GT(L, g) { return G(L, g).property("ADBE Vector Transform Group"); }
+function addRect(L, g, w, h, r, p, nm) {
+    nm = nm || "Rect";
+    GC(L, g).addProperty("ADBE Vector Shape - Rect").name = nm;
+    var s = GC(L, g).property(nm);
+    s.property("ADBE Vector Rect Size").setValue([w, h]);
+    s.property("ADBE Vector Rect Roundness").setValue(r || 0);
+    if (p) s.property("ADBE Vector Rect Position").setValue(p);
+    return s;
+}
+function addEllipse(L, g, w, h, p, nm) {
+    nm = nm || "Ellipse";
+    GC(L, g).addProperty("ADBE Vector Shape - Ellipse").name = nm;
+    var s = GC(L, g).property(nm);
+    s.property("ADBE Vector Ellipse Size").setValue([w, h]);
+    if (p) s.property("ADBE Vector Ellipse Position").setValue(p);
+    return s;
+}
+function addPath(L, g, verts, closed, inT, outT, nm) {
+    nm = nm || "Path";
+    GC(L, g).addProperty("ADBE Vector Shape - Group").name = nm;
+    var s = new Shape();
+    s.vertices = verts;
+    s.closed = !!closed;
+    if (inT) s.inTangents = inT;
+    if (outT) s.outTangents = outT;
+    GC(L, g).property(nm).property("ADBE Vector Shape").setValue(s);
+    return GC(L, g).property(nm);
+}
+function addStar(L, g, pts, outer, inner, round, p, nm) {
+    nm = nm || "Star";
+    GC(L, g).addProperty("ADBE Vector Shape - Star").name = nm;
+    var s = GC(L, g).property(nm);
+    s.property("ADBE Vector Star Type").setValue(1);
+    s.property("ADBE Vector Star Points").setValue(pts);
+    s.property("ADBE Vector Star Outer Radius").setValue(outer);
+    s.property("ADBE Vector Star Inner Radius").setValue(inner);
+    s.property("ADBE Vector Star Inner Roundess").setValue(round || 0);
+    if (p) s.property("ADBE Vector Star Position").setValue(p);
+    return s;
+}
+function addFill(L, g, c, op) {
+    GC(L, g).addProperty("ADBE Vector Graphic - Fill").name = "Fill";
+    var f = GC(L, g).property("Fill");
+    setCol(f.property("ADBE Vector Fill Color"), c);
+    if (op !== undefined) f.property("ADBE Vector Fill Opacity").setValue(op);
+    return f;
+}
+function addStroke(L, g, c, w, op) {
+    GC(L, g).addProperty("ADBE Vector Graphic - Stroke").name = "Stroke";
+    var s = GC(L, g).property("Stroke");
+    setCol(s.property("ADBE Vector Stroke Color"), c);
+    s.property("ADBE Vector Stroke Width").setValue(w);
+    s.property("ADBE Vector Stroke Line Cap").setValue(2);
+    s.property("ADBE Vector Stroke Line Join").setValue(2);
+    if (op !== undefined) s.property("ADBE Vector Stroke Opacity").setValue(op);
+    return s;
+}
+function addTrim(L, g) {
+    GC(L, g).addProperty("ADBE Vector Filter - Trim").name = "Trim";
+    return GC(L, g).property("Trim");
+}
+function shadow(L, op, dist, soft) {
+    var d = addFx(L, "ADBE Drop Shadow", "Soft Shadow");
+    d.property("ADBE Drop Shadow-0001").setValue([0, 0, 0]);
+    d.property("ADBE Drop Shadow-0002").setValue(255 * (op || 0.08));
+    d.property("ADBE Drop Shadow-0003").setValue(180);
+    d.property("ADBE Drop Shadow-0004").setValue(dist || 18);
+    d.property("ADBE Drop Shadow-0005").setValue(soft || 70);
+}
+// simple card: rounded rect shape layer centred at x,y
+function card(name, x, y, w, h, r, col, op) {
+    var L = shape(name, x, y);
+    group(L, "Card");
+    addRect(L, "Card", w, h, r);
+    addFill(L, "Card", col || "Card", op);
+    return L;
+}
+
+// ---------------------------------------------------------------- animation
+// Shared expression header. D = reveal duration (s).
+function EH(d) {
+    return 'var C=thisComp.layer("CONTROLS");var sp=Math.max(.1,C.effect("Speed")(1));' +
+        'function eo(x){x=clamp(x,0,1);return 1-Math.pow(1-x,4);}' +
+        'function eb(x){x=clamp(x,0,1);var c=1.6;return 1+(c+1)*Math.pow(x-1,3)+c*Math.pow(x-1,2);}' +
+        'var ti=(time-inPoint)/(' + d + '/sp);' +
+        'var to=C.effect("Animate Out")(1)?(outPoint-time)/(0.45/sp):9;' +
+        'var e=Math.min(eo(ti),eo(to));var eP=Math.min(eb(ti),eo(to));';
+}
+// NOTE: x/y travel replaces any existing Position expression, so skip it on layers whose position is expression-driven.
+// o: d (dur) | x,y (travel px) | s (scale from, 0-1) | pop (overshoot) | rot (deg from) | blur (mult, 0 = none)
+function A(L, o) {
+    o = o || {};
+    var h = EH(o.d || 0.7);
+    var k = o.pop ? "eP" : "e";
+    tr(L, "ADBE Opacity").expression = h + "value*e;";
+    if (o.x || o.y) tr(L, "ADBE Position").expression = h + "add(value,[" + (o.x || 0) + "*(1-" + k + ")," + (o.y || 0) + "*(1-" + k + ")]);";
+    if (o.s !== undefined) tr(L, "ADBE Scale").expression = h + "mul(value," + o.s + "+(1-" + o.s + ")*" + k + ");";
+    if (o.rot) tr(L, "ADBE Rotate Z").expression = h + "value+(" + o.rot + ")*(1-" + k + ");";
+    if (o.blur !== 0) {
+        var b = addFx(L, "ADBE Gaussian Blur 2", "Reveal Blur");
+        b.property(1).expression = h + 'C.effect("Blur Amount")(1)*' + (o.blur || 1) + "*(1-e);";
+    }
+    return L;
+}
+// Character type-on with a soft blurred leading edge. Speed follows CONTROLS "Type Speed".
+function typeOn(L, delay, band, mult) {
+    band = band || 20;
+    var anims = L.property("ADBE Text Properties").property("ADBE Text Animators");
+    anims.addProperty("ADBE Text Animator").name = "Type On";
+    var ap = anims.property("Type On").property("ADBE Text Animator Properties");
+    ap.addProperty("ADBE Text Opacity");
+    ap = anims.property("Type On").property("ADBE Text Animator Properties");
+    ap.addProperty("ADBE Text Blur");
+    ap = anims.property("Type On").property("ADBE Text Animator Properties");
+    ap.addProperty("ADBE Text Position 3D");
+    ap = anims.property("Type On").property("ADBE Text Animator Properties");
+    ap.property("ADBE Text Opacity").setValue(0);
+    ap.property("ADBE Text Blur").setValue([14, 14]);
+    try { ap.property("ADBE Text Position 3D").setValue([0, 10, 0]); }
+    catch (e) { ap.property("ADBE Text Position 3D").setValue([0, 10]); }
+    anims.property("Type On").property("ADBE Text Selectors").addProperty("ADBE Text Selector");
+    var sel = anims.property("Type On").property("ADBE Text Selectors").property(1);
+    sel.property("ADBE Text Percent End").setValue(band);
+    sel.property("ADBE Text Range Advanced").property("ADBE Text Range Shape").setValue(2); // ramp up
+    sel.property("ADBE Text Percent Offset").expression =
+        'var C=thisComp.layer("CONTROLS");var sp=Math.max(.1,C.effect("Speed")(1));' +
+        'var s=text.sourceText;var n=Math.max(1,((s.value!==undefined?s.value:s)+"").length);' +
+        'var d=n/(Math.max(1,C.effect("Type Speed")(1))*sp*' + (mult || 1) + ');' +
+        'linear(time-inPoint-' + (delay || 0) + ',0,d+0.12,-' + band + ',100);';
+    return L;
+}
+// fade-only reveal used alongside typeOn (handles the outro)
+// mult speeds up long paragraphs relative to the global Type Speed
+function typeLayer(L, t, delay, mult) { at(L, t); typeOn(L, delay || 0, 20, mult); A(L, { d: 0.2, blur: 0 }); return L; }
+
+// ---------------------------------------------------------------- counters
+// Number text driven by CONTROLS sliders; format text uses # as the number placeholder.
+function counterExpr(numFx, decFx, fmtLayer, delay, durFx) {
+    return 'var C=thisComp.layer("CONTROLS");var sp=Math.max(.1,C.effect("Speed")(1));' +
+        'var v=C.effect("' + numFx + '")(1);var dc=Math.round(clamp(C.effect("' + decFx + '")(1),0,4));' +
+        'var d=Math.max(.05,C.effect("' + (durFx || "Count Duration") + '")(1))/sp;' +
+        'var t=clamp((time-inPoint-' + (delay || 0) + ')/d,0,1);var e=1-Math.pow(1-t,4);' +
+        'var s=(v*e).toFixed(dc);' +
+        'if(C.effect("Thousands Separator")(1)){var p=s.split(".");p[0]=p[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g,",");s=p.join(".");}' +
+        'var f=' + txtOf(fmtLayer) + ';f.indexOf("#")<0?s+f:f.replace("#",s);';
+}
+// hidden text layer that only exists to be edited in Essential Graphics
+function guideText(name, str, label) {
+    var L = T(name, str, { size: 30, x: 60, y: 1060 });
+    L.guideLayer = true;
+    L.enabled = false;
+    L.shy = true;
+    L.label = 5;
+    qText(name, label || name);
+    return L;
+}
+
+// ---------------------------------------------------------------- pills (auto-size to their text)
+// o: x,y,h,px,minW,anchor('L'|'C'),fill,fillOp,stroke,sw,font,size,tcol,r,extraW(room for icon, left side),fixedW
+function pill(name, str, o) {
+    var S = shape(name, o.x, o.y);
+    group(S, "Pill");
+    addRect(S, "Pill", o.fixedW || 200, o.h, o.r !== undefined ? o.r : o.h / 2);
+    if (o.fill) addFill(S, "Pill", o.fill, o.fillOp);
+    if (o.stroke) addStroke(S, "Pill", o.stroke, o.sw || 3);
+    var tn = name + " Text";
+    var t = T(tn, str, { font: o.font || "semi", size: o.size || 32, col: o.tcol || "Text", x: 0, y: 0, just: "C", track: o.track, egp: o.egp });
+    t.parent = S;
+    tr(t, "ADBE Scale").setValue([100, 100]);
+    pos(t, [0, Math.round((o.size || 32) * 0.35) + (o.dy || 0)]);
+    var ex = o.extraW || 0;
+    var rect = GC(S, "Pill").property("Rect");
+    if (!o.fixedW) {
+        rect.property("ADBE Vector Rect Size").expression =
+            'var r=thisComp.layer("' + tn + '").sourceRectAtTime(time,false);[Math.max(r.width+' + (2 * (o.px || 24) + ex) + ',' + (o.minW || 0) + '),' + o.h + '];';
+    }
+    if (o.anchor == "L") {
+        rect.property("ADBE Vector Rect Position").expression = 'var s=content("Pill").content("Rect").size;[s[0]/2,0];';
+        tr(t, "ADBE Position").expression = 'var s=parent.content("Pill").content("Rect").size;[s[0]/2+' + (ex / 2) + ',value[1]];';
+    } else if (ex) {
+        tr(t, "ADBE Position").expression = '[' + (ex / 2) + ',value[1]];';
+    }
+    return S;
+}
+function pillW(name) { return 'thisComp.layer("' + name + '").content("Pill").content("Rect").size[0]'; }
+
+// ---------------------------------------------------------------- icons (unit coords scaled by sz)
+function sc(arr, s) { var o = []; for (var i = 0; i < arr.length; i++) o.push([arr[i][0] * s, arr[i][1] * s]); return o; }
+var ICONS = {
+    check:   [{ p: [[-0.36, 0.02], [-0.1, 0.27], [0.38, -0.25]] }],
+    chevDown:[{ p: [[-0.38, -0.18], [0, 0.2], [0.38, -0.18]] }],
+    chevLeft:[{ p: [[0.18, -0.4], [-0.2, 0], [0.18, 0.4]] }],
+    chevRight:[{ p: [[-0.18, -0.4], [0.2, 0], [-0.18, 0.4]] }],
+    plus:    [{ p: [[-0.4, 0], [0.4, 0]] }, { p: [[0, -0.4], [0, 0.4]] }],
+    minus:   [{ p: [[-0.4, 0], [0.4, 0]] }],
+    heart:   [{ p: [[0, 0.42], [-0.47, -0.04], [-0.24, -0.4], [0, -0.2], [0.24, -0.4], [0.47, -0.04]], c: 1,
+               i: [[0.18, -0.12], [0, 0.18], [-0.16, 0], [-0.03, -0.12], [-0.12, 0], [0, -0.16]],
+               o: [[-0.18, -0.12], [0, -0.16], [0.12, 0], [0.03, -0.12], [0.16, 0], [0, 0.18]] }],
+    bubble:  [{ p: [[-0.36, 0.38], [-0.3, 0.16], [-0.44, -0.04], [0, -0.42], [0.44, -0.04], [0, 0.34], [-0.12, 0.3]], c: 1,
+               i: [[0, 0], [0, 0], [0, 0.12], [-0.24, 0], [0, -0.22], [0.24, 0], [0.06, 0.02]],
+               o: [[0, 0], [-0.08, -0.08], [0, -0.22], [0.24, 0], [0, 0.22], [-0.06, 0], [0, 0]] }],
+    send:    [{ p: [[-0.44, -0.38], [0.46, -0.38], [-0.02, 0.44]], c: 1 }, { p: [[-0.16, -0.08], [0.46, -0.38]] }],
+    bookmark:[{ p: [[-0.3, -0.44], [0.3, -0.44], [0.3, 0.44], [0, 0.18], [-0.3, 0.44]], c: 1 }],
+    cart:    [{ p: [[-0.48, -0.36], [-0.32, -0.36], [-0.18, 0.18], [0.36, 0.18], [0.46, -0.2], [-0.25, -0.2]] }, { e: [-0.12, 0.38, 0.07], f: 1 }, { e: [0.3, 0.38, 0.07], f: 1 }],
+    bell:    [{ p: [[-0.4, 0.22], [-0.3, 0.06], [-0.3, -0.1], [0, -0.4], [0.3, -0.1], [0.3, 0.06], [0.4, 0.22]], c: 1,
+               i: [[0, 0], [-0.02, 0.08], [0, 0], [-0.2, 0], [0, -0.2], [0, 0], [-0.08, -0.06]],
+               o: [[0.08, -0.06], [0, 0], [0, -0.2], [0.2, 0], [0, 0], [0.02, 0.08], [0, 0]] },
+             { p: [[-0.1, 0.34], [0.1, 0.34]], i: [[0, 0], [0.04, 0.1]], o: [[-0.04, 0.1], [0, 0]], arc: 1 }],
+    search:  [{ e: [-0.08, -0.08, 0.32] }, { p: [[0.16, 0.16], [0.42, 0.42]] }],
+    retweet: [{ p: [[-0.34, 0.12], [-0.34, -0.2], [0.28, -0.2]] }, { p: [[0.14, -0.34], [0.28, -0.2], [0.14, -0.06]] },
+              { p: [[0.34, -0.12], [0.34, 0.2], [-0.28, 0.2]] }, { p: [[-0.14, 0.34], [-0.28, 0.2], [-0.14, 0.06]] }],
+    upload:  [{ p: [[0, -0.4], [0, 0.12]] }, { p: [[-0.18, -0.22], [0, -0.4], [0.18, -0.22]] }, { p: [[-0.38, 0.04], [-0.38, 0.4], [0.38, 0.4], [0.38, 0.04]] }],
+    stats:   [{ p: [[-0.33, 0.4], [-0.33, 0.05]] }, { p: [[-0.11, 0.4], [-0.11, -0.4]] }, { p: [[0.11, 0.4], [0.11, -0.1]] }, { p: [[0.33, 0.4], [0.33, 0.2]] }],
+    camera:  [{ r: [0, 0.05, 0.92, 0.66, 0.16] }, { e: [0, 0.07, 0.19] }, { p: [[-0.16, -0.28], [-0.1, -0.38], [0.1, -0.38], [0.16, -0.28]] }],
+    star:    [{ star: [5, 0.5, 0.22], f: 1 }],
+    sparkle: [{ star: [4, 0.5, 0.12, 60], f: 1 }],
+    thumb:   [{ r: [-0.38, 0.12, 0.16, 0.6, 0.04] },
+              { p: [[-0.24, 0.42], [0.32, 0.42], [0.44, 0.02], [0.32, -0.1], [0.06, -0.1], [0.12, -0.36], [-0.02, -0.46], [-0.24, -0.12]], c: 1,
+                i: [[0, 0], [-0.06, 0], [0.02, -0.06], [0.08, 0], [0, 0], [0.04, 0.12], [0.06, -0.02], [0, 0]],
+                o: [[0, 0], [0.08, 0], [0, -0.08], [0, 0], [0, 0], [0, -0.08], [-0.06, 0.02], [0, 0]] }],
+    list:    [{ r: [0, -0.18, 0.84, 0.3, 0.08] }, { r: [0, 0.2, 0.84, 0.3, 0.08] }, { p: [[-0.24, -0.18], [0.2, -0.18]] }, { p: [[-0.24, 0.2], [0.06, 0.2]] }],
+    card:    [{ r: [0.06, 0.06, 0.82, 0.56, 0.08] }, { p: [[-0.35, -0.08], [0.47, -0.08]] }, { p: [[-0.38, -0.22], [-0.38, -0.3], [0.38, -0.3]] }],
+    turn:    [{ p: [[-0.28, 0.4], [-0.28, 0.0], [0.26, -0.12]], i: [[0, 0], [0, 0.16], [-0.2, 0]], o: [[0, 0], [0, -0.16], [0, 0]] }, { p: [[0.08, -0.32], [0.3, -0.12], [0.08, 0.08]] }],
+    share:   [{ p: [[-0.42, 0.34], [0.22, -0.12]], i: [[0, 0], [-0.4, 0]], o: [[0.02, -0.34], [0, 0]] }, { p: [[0.1, -0.36], [0.42, -0.1], [0.1, 0.16]] }],
+    note:    [{ p: [[-0.14, 0.28], [-0.14, -0.38], [0.3, -0.46], [0.3, 0.2]] }, { e: [-0.26, 0.3, 0.12], f: 1 }, { e: [0.18, 0.22, 0.12], f: 1 }],
+    dots:    [{ e: [-0.36, 0, 0.09], f: 1 }, { e: [0, 0, 0.09], f: 1 }, { e: [0.36, 0, 0.09], f: 1 }]
+};
+// draws an icon as its own shape layer, centred at x,y
+function icon(name, type, x, y, sz, col, sw, rot) {
+    var L = shape(name, x, y);
+    var parts = ICONS[type];
+    var swv = sw || Math.max(2, sz * 0.085);
+    for (var i = 0; i < parts.length; i++) {
+        var p = parts[i];
+        var g = group(L, "Part " + (i + 1));
+        if (p.p) addPath(L, g, sc(p.p, sz), p.c, p.i ? sc(p.i, sz) : null, p.o ? sc(p.o, sz) : null);
+        if (p.e) addEllipse(L, g, p.e[2] * 2 * sz, p.e[2] * 2 * sz, [p.e[0] * sz, p.e[1] * sz]);
+        if (p.r) addRect(L, g, p.r[2] * sz, p.r[3] * sz, p.r[4] * sz, [p.r[0] * sz, p.r[1] * sz]);
+        if (p.star) { var s = addStar(L, g, p.star[0], p.star[1] * sz, p.star[2] * sz, p.star[3] || 0); }
+        if (p.f) addFill(L, g, col); else addStroke(L, g, col, swv);
+    }
+    if (rot) tr(L, "ADBE Rotate Z").setValue(rot);
+    return L;
+}
+
+// ---------------------------------------------------------------- media slots
+function roundRectShape(x0, y0, w, h, r) {
+    var k = r * KAPPA;
+    var s = new Shape();
+    s.vertices = [[x0 + r, y0], [x0 + w - r, y0], [x0 + w, y0 + r], [x0 + w, y0 + h - r], [x0 + w - r, y0 + h], [x0 + r, y0 + h], [x0, y0 + h - r], [x0, y0 + r]];
+    s.inTangents = [[-k, 0], [0, 0], [0, -k], [0, 0], [k, 0], [0, 0], [0, k], [0, 0]];
+    s.outTangents = [[0, 0], [k, 0], [0, 0], [0, k], [0, 0], [-k, 0], [0, 0], [0, -k]];
+    s.closed = true;
+    return s;
+}
+// Creates a "MEDIA · ..." precomp (drop your image/video inside) and places it masked.
+function media(name, w, h, r, x, y, o) {
+    o = o || {};
+    var tag = CTX.comp.name.substr(0, 2);
+    var pc = app.project.items.addComp("MEDIA " + tag + " · " + name, w, h, 1, CTX.comp.duration, 30);
+    pc.parentFolder = FOLD.media;
+    pc.comment = "Replace: drop your image/video in here and scale it to fill. Delete the placeholder layers.";
+    var bg = pc.layers.addSolid([0.8, 0.8, 0.82], "Placeholder (delete)", w, h, 1, CTX.comp.duration);
+    var rp = bg.property(FX).addProperty("ADBE Ramp");
+    rp.property("ADBE Ramp-0001").setValue([0, 0]);
+    rp.property("ADBE Ramp-0002").setValue(hex(o.c1 || "#E3E3E8"));
+    rp.property("ADBE Ramp-0003").setValue([w, h]);
+    rp.property("ADBE Ramp-0004").setValue(hex(o.c2 || "#C7C7CC"));
+    if (w >= 160) {
+        var lt = pc.layers.addText(o.label || "Drop media here");
+        var sp = lt.property("ADBE Text Properties").property("ADBE Text Document");
+        var d = sp.value;
+        d.resetCharStyle(); d.font = FONT.med; d.fontSize = Math.max(14, Math.min(28, w / 14));
+        d.applyFill = true; d.fillColor = hex(o.lc || "#8E8E93"); d.applyStroke = false;
+        d.justification = ParagraphJustification.CENTER_JUSTIFY;
+        sp.setValue(d);
+        lt.name = "Placeholder label (delete)";
+        lt.property(TR).property("ADBE Position").setValue([w / 2, h / 2 + 8]);
+    }
+    var L = CTX.comp.layers.add(pc);
+    L.name = name;
+    pos(L, [x + w / 2, y + h / 2]);   // x,y = top-left corner; anchor stays centred for clean scaling
+    var m = L.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
+    m.name = "Corner Radius";
+    L.property("ADBE Mask Parade").property(1).property("ADBE Mask Shape").setValue(roundRectShape(0, 0, w, h, Math.min(r, w / 2, h / 2)));
+    return L;
+}
+
+// ---------------------------------------------------------------- sound
+function sfx(key, t, vol) {
+    if (!SFX[key]) { LOG("missing sfx " + key); return null; }
+    var L = CTX.comp.layers.add(SFX[key]);
+    L.startTime = t;
+    L.name = "SFX · " + key;
+    L.label = 11;
+    var lv = L.property("ADBE Audio Group").property("ADBE Audio Levels");
+    lv.setValue([vol || 0, vol || 0]);
+    // plain arithmetic only: audio expressions are evaluated per sample and are picky
+    lv.expression = 'var C=thisComp.layer("CONTROLS");var g=C.effect("SFX Volume (dB)")(1);if(C.effect("Mute SFX")(1)>0){g=-192;}[value[0]+g,value[1]+g];';
+    L.moveToEnd();
+    return L;
+}
